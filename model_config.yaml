@@ -1,0 +1,20 @@
+weights:
+  posterior: 0.35
+  regime_quality: 0.25
+  confluence: 0.25
+  sentiment_align: 0.15
+penalties:
+  news_proximity: 15
+  spread_widening: 10
+  liquidity_thin: 10
+  mdl_buffer_low: 10
+  signal_conflict: 10
+regime:
+  adx_like: 20
+  ema_slope_min: 0.0
+  atr_low: 0.006     # 0.6%
+  atr_high: 0.014    # 1.4%
+confluence_components:
+  - high_tf_trend_agrees
+  - vwap_side_agrees
+  - context_agrees

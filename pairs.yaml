@@ -1,0 +1,12 @@
+pairs:
+  - EURUSD
+  - GBPUSD
+  - USDJPY
+  - USDCAD
+timeframes:
+  bias: ["1d", "4h", "1h"]
+  entry: ["15m", "5m"]
+session_et:
+  asia:   ["20:00","03:00"]
+  london: ["03:00","07:00"]
+  ny:     ["08:00","12:00"]
