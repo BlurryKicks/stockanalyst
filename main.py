@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
 import pandas as pd
 import numpy as np
 import yaml
@@ -115,11 +115,85 @@ def page_score(posterior, regime_quality, conf_ratio, sent_align,
     return max(0.0, min(100.0, base - pen))
 
 # ----------------------- Routes ------------------------
-@app.get("/health")
-def health():
-    return {"ok": True, "time": datetime.now(timezone.utc).isoformat()}
 
-@app.post("/features")
+# Homepage with API documentation
+@app.route("/")
+def home():
+    html_template = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Trading Analysis API</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }
+            .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            h1 { color: #333; text-align: center; }
+            h2 { color: #666; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+            .endpoint { background: #f9f9f9; padding: 15px; margin: 10px 0; border-radius: 5px; border-left: 4px solid #007cba; }
+            .method { background: #007cba; color: white; padding: 3px 8px; border-radius: 3px; font-size: 12px; }
+            .status { text-align: center; padding: 20px; background: #e8f5e8; border-radius: 5px; margin: 20px 0; }
+            code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+            .footer { text-align: center; margin-top: 30px; color: #888; font-size: 14px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🚀 Trading Analysis API</h1>
+            
+            <div class="status">
+                <strong>✅ Server Status: Online</strong><br>
+                <small>Server Time: {{ current_time }}</small>
+            </div>
+
+            <h2>📚 Available Endpoints</h2>
+            
+            <div class="endpoint">
+                <h3><span class="method">GET</span> /health</h3>
+                <p>Health check endpoint that returns server status and current time.</p>
+                <p><strong>Response:</strong> <code>{"ok": true, "time": "..."}</code></p>
+            </div>
+
+            <div class="endpoint">
+                <h3><span class="method">POST</span> /features</h3>
+                <p>Processes OHLCV trading data and calculates technical indicators (EMA, ATR, VWAP).</p>
+                <p><strong>Input:</strong> JSON with pair, timeframe, OHLCV data, session, spread_state</p>
+                <p><strong>Output:</strong> Technical analysis features</p>
+            </div>
+
+            <div class="endpoint">
+                <h3><span class="method">POST</span> /regime</h3>
+                <p>Performs regime analysis on market data to determine trend conditions.</p>
+                <p><strong>Input:</strong> JSON with pair, OHLCV data, high_tf_bias</p>
+                <p><strong>Output:</strong> Regime classification and quality metrics</p>
+            </div>
+
+            <div class="endpoint">
+                <h3><span class="method">POST</span> /ensemble</h3>
+                <p>Provides ensemble scoring for trading decisions based on multiple factors.</p>
+                <p><strong>Input:</strong> JSON with features, regime, sentiment, market conditions</p>
+                <p><strong>Output:</strong> Comprehensive trading score and reasoning</p>
+            </div>
+
+            <div class="footer">
+                <p>Trading Analysis API • Running on Flask</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return render_template_string(html_template, current_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"))
+
+# Health check endpoint
+@app.route("/health")
+def health():
+    return jsonify({
+        "ok": True, 
+        "time": datetime.now(timezone.utc).isoformat(),
+        "status": "healthy",
+        "version": "1.0.0"
+    })
+
+@app.route("/features", methods=["POST"])
 def features():
     """
     Input JSON:
@@ -154,7 +228,7 @@ def features():
     }
     return jsonify(out)
 
-@app.post("/regime")
+@app.route("/regime", methods=["POST"])
 def regime():
     """
     Input JSON:
@@ -173,7 +247,7 @@ def regime():
     r["high_tf_bias"] = data.get("high_tf_bias","neutral")
     return jsonify(r)
 
-@app.post("/ensemble")
+@app.route("/ensemble", methods=["POST"])
 def ensemble():
     """
     Input JSON:
@@ -268,6 +342,17 @@ def ensemble():
     }
     return jsonify(out)
 
+# Error handlers
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Endpoint not found", "message": "Check the API documentation at /"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"error": "Internal server error", "message": "Something went wrong"}), 500
+
 if __name__ == "__main__":
-    import os
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    print(f"🚀 Starting Flask server on port {port}")
+    print(f"📡 Server will be accessible at http://0.0.0.0:{port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
