@@ -3,8 +3,8 @@ import pandas as pd
 import numpy as np
 import yaml
 import os
-from datetime import datetime, timezone
-import json  # for parsing stringified JSON bodies
+import json 
+from datetime import datetime, timezone 
 
 app = Flask(__name__)
 
@@ -29,6 +29,20 @@ def _maybe_parse_dict(value):
         except Exception:
             return value
     return value
+
+def _jnum(x):
+    try:
+        if x is None:
+            return None
+        # pandas/numpy NaN or inf
+        if pd.isna(x):
+            return None
+        xf = float(x)
+        if np.isinf(xf) or np.isnan(xf):
+            return None
+        return xf
+    except Exception:
+        return None
 
 # -------- Safe config loads (works even if YAMLs are missing) --------
 DEFAULT_CFG = {
@@ -248,12 +262,12 @@ def features():
     out = {
         "pair": data.get("pair", ""),
         "timeframe": data.get("timeframe", ""),
-        "last_close": float(df["close"].iloc[-1]),
-        "ema20": float(df["ema20"].iloc[-1]),
-        "ema50": float(df["ema50"].iloc[-1]),
-        "ema200": float(df["ema200"].iloc[-1]),
-        "atrp14": float(df["atrp14"].iloc[-1]),
-        "vwap": float(df["vwap"].iloc[-1]),
+        "last_close": _jnum(df["close"].iloc[-1]),
+        "ema20": _jnum(df["ema20"].iloc[-1]),
+        "ema50": _jnum(df["ema50"].iloc[-1]),
+        "ema200": _jnum(df["ema200"].iloc[-1]),
+        "atrp14": _jnum(df["atrp14"].iloc[-1]),
+        "vwap": _jnum(df["vwap"].iloc[-1]),
         "spread_state": data.get("spread_state", "Unknown"),
         "session": data.get("session", "unknown"),
     }
@@ -274,6 +288,9 @@ def regime():
 
     df = to_df(data["ohlcv"])
     r = regime_tag(df)
+    # ensure numeric fields are JSON-safe
+    r["ema50_slope"] = _jnum(r.get("ema50_slope"))
+    r["atrp"] = _jnum(r.get("atrp"))
 
     rq_map = {"Trend-Up": 1.0, "Trend-Down": 1.0, "Mean-Revert": 0.6, "Chop": 0.4}
     r["regime_quality"] = rq_map.get(r["regime"], 0.5)
