@@ -93,8 +93,12 @@ def atr_percent(df, n=14):
 
 def ema_slope(close, n=50):
     e = ema(close, n)
-    # smoother slope: average of last 5 bar change
-    return (e.iloc[-1] - e.iloc[-5]) / 5.0
+    # handle short series safely
+    if len(e) < 2:
+        return 0.0
+    if len(e) < 5:
+        return float((e.iloc[-1] - e.iloc[0]) / max(1, len(e) - 1))
+    return float((e.iloc[-1] - e.iloc[-5]) / 5.0)
 
 def to_df(ohlcv):
     df = pd.DataFrame(ohlcv)
@@ -279,10 +283,10 @@ def features():
 @app.route("/regime", methods=["POST"])
 def regime():
     """
-    Expected JSON object (but we also accept a one-element array):
+    Expected JSON (we also accept a one-element array and stringified OHLCV):
     {
       "pair": "EURUSD",
-      "ohlcv": [ {ts, open, high, low, close, volume}, ... ],   # may be stringified
+      "ohlcv": [ {ts, open, high, low, close, volume}, ... ],
       "high_tf_bias": "up"|"down"|"neutral"
     }
     """
@@ -297,7 +301,7 @@ def regime():
 
         # Validate base shape
         if not isinstance(data, dict):
-            return jsonify({"error":"bad_request","message":"Body must be a JSON object"}), 400
+            return jsonify({"error": "bad_request", "message": "Body must be a JSON object"}), 400
 
         # Normalize OHLCV even if stringified
         data = _normalize_ohlcv(data)
@@ -306,28 +310,45 @@ def regime():
         pair = data.get("pair")
         ohlcv = data.get("ohlcv")
         if not pair or not isinstance(pair, str):
-            return jsonify({"error":"bad_request","message":"Field 'pair' is required as string"}), 400
+            return jsonify({"error": "bad_request", "message": "Field 'pair' is required as string"}), 400
         if not isinstance(ohlcv, list) or len(ohlcv) == 0:
-            return jsonify({"error":"bad_request","message":"Field 'ohlcv' must be a non-empty array"}), 400
+            return jsonify({"error": "bad_request", "message": "Field 'ohlcv' must be a non-empty array"}), 400
 
         # Build dataframe
         df = to_df(ohlcv)
 
-        # Compute regime + sanitize numbers
+        # --- Handle short samples safely (avoid IndexError in ema_slope etc.) ---
+        bars = len(df)
+        min_needed = 5
+        warnings = []
+        if bars < min_needed:
+            warnings.append(f"Short sample: {bars} bars (< {min_needed}); slope uses available window.")
+        # ------------------------------------------------------------------------
+
+        # Compute regime
         r = regime_tag(df)
+
+        # Sanitize numbers
         r["ema50_slope"] = _jnum(r.get("ema50_slope"))
         r["atrp"] = _jnum(r.get("atrp"))
 
+        # Quality + echo inputs
         rq_map = {"Trend-Up": 1.0, "Trend-Down": 1.0, "Mean-Revert": 0.6, "Chop": 0.4}
-        r["regime_quality"] = rq_map.get(r["regime"], 0.5)
+        r["regime_quality"] = rq_map.get(r.get("regime"), 0.5)
         r["pair"] = pair
         r["high_tf_bias"] = data.get("high_tf_bias", "neutral")
+
+        # Extras for debugging/telemetry
+        r["received_len"] = bars
+        r["min_bars_recommended"] = min_needed
+        if warnings:
+            r["warnings"] = warnings
 
         return jsonify(r)
 
     except Exception as e:
         app.logger.exception("Regime error: %s", e)
-        return jsonify({"error":"server_error","message":str(e)}), 500
+        return jsonify({"error": "server_error", "message": str(e)}), 500
 
 @app.route("/ensemble", methods=["POST"])
 def ensemble():
