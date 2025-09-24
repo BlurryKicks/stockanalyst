@@ -4,16 +4,19 @@ import numpy as np
 import yaml
 import os
 from datetime import datetime, timezone
+import json  # for parsing stringified JSON bodies
 
-import json
+app = Flask(__name__)
 
+# ---------- helpers to accept stringified JSON from n8n ----------
 def _normalize_ohlcv(payload: dict):
-    """Accept ohlcv as list OR as a JSON string, normalize to list."""
+    """Accept ohlcv as list OR as a JSON string; normalize to list."""
     ohlcv = payload.get("ohlcv", [])
     if isinstance(ohlcv, str):
         try:
             ohlcv = json.loads(ohlcv)
         except Exception:
+            # leave as-is if parsing fails
             pass
     payload["ohlcv"] = ohlcv
     return payload
@@ -27,26 +30,26 @@ def _maybe_parse_dict(value):
             return value
     return value
 
-app = Flask(__name__)
-
 # -------- Safe config loads (works even if YAMLs are missing) --------
 DEFAULT_CFG = {
-  "weights":{"posterior":0.35,"regime_quality":0.25,"confluence":0.25,"sentiment_align":0.15},
-  "penalties":{"news_proximity":15,"spread_widening":10,"liquidity_thin":10,"mdl_buffer_low":10,"signal_conflict":10},
-  "regime":{"adx_like":20,"ema_slope_min":0.0,"atr_low":0.006,"atr_high":0.014}
+    "weights": {"posterior": 0.35, "regime_quality": 0.25, "confluence": 0.25, "sentiment_align": 0.15},
+    "penalties": {"news_proximity": 15, "spread_widening": 10, "liquidity_thin": 10, "mdl_buffer_low": 10, "signal_conflict": 10},
+    "regime": {"adx_like": 20, "ema_slope_min": 0.0, "atr_low": 0.006, "atr_high": 0.014},
 }
 try:
-    with open("model_config.yaml","r") as f: CFG = yaml.safe_load(f) or DEFAULT_CFG
+    with open("model_config.yaml", "r") as f:
+        CFG = yaml.safe_load(f) or DEFAULT_CFG
 except FileNotFoundError:
     CFG = DEFAULT_CFG
 
 DEFAULT_PAIRS = {
-  "pairs":["EURUSD","GBPUSD","USDJPY","USDCAD"],
-  "timeframes":{"bias":["1d","4h","1h"],"entry":["15m","5m"]},
-  "session_et":{"asia":["20:00","03:00"],"london":["03:00","07:00"],"ny":["08:00","12:00"]}
+    "pairs": ["EURUSD", "GBPUSD", "USDJPY", "USDCAD"],
+    "timeframes": {"bias": ["1d", "4h", "1h"], "entry": ["15m", "5m"]},
+    "session_et": {"asia": ["20:00", "03:00"], "london": ["03:00", "07:00"], "ny": ["08:00", "12:00"]},
 }
 try:
-    with open("pairs.yaml","r") as f: PAIRS = yaml.safe_load(f) or DEFAULT_PAIRS
+    with open("pairs.yaml", "r") as f:
+        PAIRS = yaml.safe_load(f) or DEFAULT_PAIRS
 except FileNotFoundError:
     PAIRS = DEFAULT_PAIRS
 
@@ -80,9 +83,11 @@ def to_df(ohlcv):
     df = pd.DataFrame(ohlcv)
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
     df = df.sort_values("ts").set_index("ts")
-    for col in ["open","high","low","close"]:
-        if col not in df.columns: df[col] = np.nan
-    if "volume" not in df.columns: df["volume"] = 1.0
+    for col in ["open", "high", "low", "close"]:
+        if col not in df.columns:
+            df[col] = np.nan
+    if "volume" not in df.columns:
+        df["volume"] = 1.0
     df = df.ffill().bfill()
     return df
 
@@ -93,7 +98,6 @@ def regime_tag(df):
     price_side = "above" if df["close"].iloc[-1] >= v.iloc[-1] else "below"
     atrp = atr_percent(df, 14).iloc[-1]
 
-    # vol bucket
     if atrp < CFG["regime"]["atr_low"]:
         vol_bucket = "Low"
     elif atrp > CFG["regime"]["atr_high"]:
@@ -101,7 +105,7 @@ def regime_tag(df):
     else:
         vol_bucket = "Normal"
 
-    liq_state = "OK"  # placeholder; n8n can override using spread/depth
+    liq_state = "OK"  # placeholder; can be overridden by spread/depth
 
     if slope > CFG["regime"]["ema_slope_min"] and price_side == "above":
         reg = "Trend-Up"
@@ -110,9 +114,14 @@ def regime_tag(df):
     else:
         reg = "Mean-Revert" if abs(slope) < 1e-5 else "Chop"
 
-    return {"regime": reg, "vol_bucket": vol_bucket, "liq_state": liq_state,
-            "ema50_slope": float(slope), "atrp": float(atrp),
-            "vwap_side": price_side}
+    return {
+        "regime": reg,
+        "vol_bucket": vol_bucket,
+        "liq_state": liq_state,
+        "ema50_slope": float(slope),
+        "atrp": float(atrp),
+        "vwap_side": price_side,
+    }
 
 def confluence_bits(high_tf_trend_agrees, vwap_side_agrees, context_agrees):
     parts = [high_tf_trend_agrees, vwap_side_agrees, context_agrees]
@@ -123,10 +132,12 @@ def page_score(posterior, regime_quality, conf_ratio, sent_align,
                news=False, spread_wide=False, liq_thin=False,
                mdl_low=False, conflict=False):
     w = CFG["weights"]
-    base = 100.0 * (w["posterior"]*posterior +
-                    w["regime_quality"]*regime_quality +
-                    w["confluence"]*conf_ratio +
-                    w["sentiment_align"]*sent_align)
+    base = 100.0 * (
+        w["posterior"] * posterior
+        + w["regime_quality"] * regime_quality
+        + w["confluence"] * conf_ratio
+        + w["sentiment_align"] * sent_align
+    )
     P = CFG["penalties"]
     pen = 0.0
     pen += P["news_proximity"] if news else 0.0
@@ -138,7 +149,6 @@ def page_score(posterior, regime_quality, conf_ratio, sent_align,
 
 # ----------------------- Routes ------------------------
 
-# Homepage with API documentation
 @app.route("/")
 def home():
     html_template = """
@@ -161,41 +171,34 @@ def home():
     <body>
         <div class="container">
             <h1>🚀 Trading Analysis API</h1>
-            
             <div class="status">
                 <strong>✅ Server Status: Online</strong><br>
                 <small>Server Time: {{ current_time }}</small>
             </div>
-
             <h2>📚 Available Endpoints</h2>
-            
             <div class="endpoint">
                 <h3><span class="method">GET</span> /health</h3>
                 <p>Health check endpoint that returns server status and current time.</p>
                 <p><strong>Response:</strong> <code>{"ok": true, "time": "..."}</code></p>
             </div>
-
             <div class="endpoint">
                 <h3><span class="method">POST</span> /features</h3>
                 <p>Processes OHLCV trading data and calculates technical indicators (EMA, ATR, VWAP).</p>
                 <p><strong>Input:</strong> JSON with pair, timeframe, OHLCV data, session, spread_state</p>
                 <p><strong>Output:</strong> Technical analysis features</p>
             </div>
-
             <div class="endpoint">
                 <h3><span class="method">POST</span> /regime</h3>
                 <p>Performs regime analysis on market data to determine trend conditions.</p>
                 <p><strong>Input:</strong> JSON with pair, OHLCV data, high_tf_bias</p>
                 <p><strong>Output:</strong> Regime classification and quality metrics</p>
             </div>
-
             <div class="endpoint">
                 <h3><span class="method">POST</span> /ensemble</h3>
                 <p>Provides ensemble scoring for trading decisions based on multiple factors.</p>
                 <p><strong>Input:</strong> JSON with features, regime, sentiment, market conditions</p>
                 <p><strong>Output:</strong> Comprehensive trading score and reasoning</p>
             </div>
-
             <div class="footer">
                 <p>Trading Analysis API • Running on Flask</p>
             </div>
@@ -203,17 +206,21 @@ def home():
     </body>
     </html>
     """
-    return render_template_string(html_template, current_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"))
+    return render_template_string(
+        html_template,
+        current_time=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+    )
 
-# Health check endpoint
 @app.route("/health")
 def health():
-    return jsonify({
-        "ok": True, 
-        "time": datetime.now(timezone.utc).isoformat(),
-        "status": "healthy",
-        "version": "1.0.0"
-    })
+    return jsonify(
+        {
+            "ok": True,
+            "time": datetime.now(timezone.utc).isoformat(),
+            "status": "healthy",
+            "version": "1.0.0",
+        }
+    )
 
 @app.route("/features", methods=["POST"])
 def features():
@@ -228,7 +235,8 @@ def features():
     }
     """
     data = request.get_json(force=True)
-  data = _normalize_ohlcv(data)
+    data = _normalize_ohlcv(data)  # normalize ohlcv (handles string or list)
+
     df = to_df(data["ohlcv"])
     df["ema20"] = ema(df["close"], 20)
     df["ema50"] = ema(df["close"], 50)
@@ -238,16 +246,16 @@ def features():
     df["vwap"] = vwap(df)
 
     out = {
-        "pair": data["pair"],
-        "timeframe": data.get("timeframe",""),
+        "pair": data.get("pair", ""),
+        "timeframe": data.get("timeframe", ""),
         "last_close": float(df["close"].iloc[-1]),
         "ema20": float(df["ema20"].iloc[-1]),
         "ema50": float(df["ema50"].iloc[-1]),
         "ema200": float(df["ema200"].iloc[-1]),
         "atrp14": float(df["atrp14"].iloc[-1]),
         "vwap": float(df["vwap"].iloc[-1]),
-        "spread_state": data.get("spread_state","Unknown"),
-        "session": data.get("session","unknown")
+        "spread_state": data.get("spread_state", "Unknown"),
+        "session": data.get("session", "unknown"),
     }
     return jsonify(out)
 
@@ -257,18 +265,20 @@ def regime():
     Input JSON:
     {
       "pair": "...",
-      "ohlcv": [...],
+      "ohlcv": [...],  # may be stringified
       "high_tf_bias": "up"|"down"|"neutral"
     }
     """
     data = request.get_json(force=True)
     data = _normalize_ohlcv(data)
+
     df = to_df(data["ohlcv"])
     r = regime_tag(df)
-    rq_map = {"Trend-Up":1.0, "Trend-Down":1.0, "Mean-Revert":0.6, "Chop":0.4}
+
+    rq_map = {"Trend-Up": 1.0, "Trend-Down": 1.0, "Mean-Revert": 0.6, "Chop": 0.4}
     r["regime_quality"] = rq_map.get(r["regime"], 0.5)
-    r["pair"] = data["pair"]
-    r["high_tf_bias"] = data.get("high_tf_bias","neutral")
+    r["pair"] = data.get("pair", "")
+    r["high_tf_bias"] = data.get("high_tf_bias", "neutral")
     return jsonify(r)
 
 @app.route("/ensemble", methods=["POST"])
@@ -277,8 +287,8 @@ def ensemble():
     Input JSON:
     {
       "pair": "USDJPY",
-      "features": {...},
-      "regime": {...},
+      "features": {...},  # may be stringified
+      "regime": {...},    # may be stringified
       "sentiment_skew": -1..+1,
       "news_lockout": false,
       "spread_wide": false,
@@ -289,52 +299,56 @@ def ensemble():
     }
     """
     j = request.get_json(force=True)
-    j["features"] = _maybe_parse_dict(j.get("features", {})) 
-    j["regime"]   = _maybe_parse_dict(j.get("regime", {}))
+    # allow features/regime to arrive as strings
+    j["features"] = _maybe_parse_dict(j.get("features", {}))
+    j["regime"] = _maybe_parse_dict(j.get("regime", {}))
+
     feats = j.get("features", {})
     reg = j.get("regime", {})
 
-    # Posterior (v1): simple alignment with EMA50 & VWAP
     price = feats.get("last_close", 0.0)
     ema50 = feats.get("ema50", price)
     vwap_last = feats.get("vwap", price)
-    intended = j.get("intended_direction","long")
+    intended = j.get("intended_direction", "long")
 
     posterior = 0.55
     if intended == "long":
-        if price >= ema50: posterior += 0.15
-        if price >= vwap_last: posterior += 0.15
+        if price >= ema50:
+            posterior += 0.15
+        if price >= vwap_last:
+            posterior += 0.15
     else:
-        if price <= ema50: posterior += 0.15
-        if price <= vwap_last: posterior += 0.15
+        if price <= ema50:
+            posterior += 0.15
+        if price <= vwap_last:
+            posterior += 0.15
     posterior = min(0.95, max(0.05, posterior))
 
-    # Confluence bits
-    high_tf_bias = reg.get("high_tf_bias","neutral")
-    regime_name = reg.get("regime","Chop")
-    vwap_side = reg.get("vwap_side","above")
-    context_dir = j.get("context_direction","flat")
+    high_tf_bias = reg.get("high_tf_bias", "neutral")
+    regime_name = reg.get("regime", "Chop")
+    vwap_side = reg.get("vwap_side", "above")
+    context_dir = j.get("context_direction", "flat")
 
     if intended == "long":
         high_tf_ok = (high_tf_bias == "up") or ("Trend-Up" in regime_name)
         vwap_ok = (vwap_side == "above")
-        context_ok = (context_dir in ["up","flat"])
+        context_ok = (context_dir in ["up", "flat"])
     else:
         high_tf_ok = (high_tf_bias == "down") or ("Trend-Down" in regime_name)
         vwap_ok = (vwap_side == "below")
-        context_ok = (context_dir in ["down","flat"])
+        context_ok = (context_dir in ["down", "flat"])
 
-    conf_count, conf_total = confluence_bits(high_tf_ok, vwap_ok, context_ok)
-    conf_ratio = conf_count / max(1, conf_total)
+    conf_count = (1 if high_tf_ok else 0) + (1 if vwap_ok else 0) + (1 if context_ok else 0)
+    conf_total = 3
+    conf_ratio = conf_count / conf_total
 
-    # Sentiment alignment (0..1)
     skew = float(j.get("sentiment_skew", 0.0))
-    sent_align = (abs(skew) if ((skew >= 0 and intended=="long") or (skew <= 0 and intended=="short")) else 0.0)
+    sent_align = abs(skew) if ((skew >= 0 and intended == "long") or (skew <= 0 and intended == "short")) else 0.0
     sent_align = min(1.0, max(0.0, sent_align))
 
     regime_quality = float(reg.get("regime_quality", 0.5))
-    conflict = (("Trend-Up" in regime_name and intended=="short") or
-                ("Trend-Down" in regime_name and intended=="long"))
+    conflict = (("Trend-Up" in regime_name and intended == "short") or
+                ("Trend-Down" in regime_name and intended == "long"))
 
     score = page_score(
         posterior=posterior,
@@ -345,30 +359,36 @@ def ensemble():
         spread_wide=j.get("spread_wide", False),
         liq_thin=j.get("liq_thin", False),
         mdl_low=j.get("mdl_buffer_low", False),
-        conflict=conflict
+        conflict=conflict,
     )
 
     reasons = []
-    if high_tf_ok: reasons.append("High-TF bias aligned")
-    if vwap_ok: reasons.append("VWAP side aligned")
-    if context_ok: reasons.append("Context aligned")
-    if j.get("news_lockout", False): reasons.append("News lockout penalty")
-    if j.get("spread_wide", False): reasons.append("Spread penalty")
-    if conflict: reasons.append("Regime conflict penalty")
+    if high_tf_ok:
+        reasons.append("High-TF bias aligned")
+    if vwap_ok:
+        reasons.append("VWAP side aligned")
+    if context_ok:
+        reasons.append("Context aligned")
+    if j.get("news_lockout", False):
+        reasons.append("News lockout penalty")
+    if j.get("spread_wide", False):
+        reasons.append("Spread penalty")
+    if conflict:
+        reasons.append("Regime conflict penalty")
 
     out = {
-        "pair": j.get("pair",""),
+        "pair": j.get("pair", ""),
         "direction": intended,
-        "posterior": round(posterior,3),
-        "regime_quality": round(regime_quality,3),
+        "posterior": round(posterior, 3),
+        "regime_quality": round(regime_quality, 3),
         "confluence": f"{conf_count}/{conf_total}",
-        "sentiment_align": round(sent_align,3),
-        "page_score": round(score,1),
-        "reasons": reasons
+        "sentiment_align": round(sent_align, 3),
+        "page_score": round(score, 1),
+        "reasons": reasons,
     }
     return jsonify(out)
 
-# Error handlers
+# ----------------------- Errors ------------------------
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({"error": "Endpoint not found", "message": "Check the API documentation at /"}), 404
@@ -377,6 +397,7 @@ def not_found(error):
 def internal_error(error):
     return jsonify({"error": "Internal server error", "message": "Something went wrong"}), 500
 
+# ----------------------- Entrypoint ---------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"🚀 Starting Flask server on port {port}")
