@@ -5,6 +5,28 @@ import yaml
 import os
 from datetime import datetime, timezone
 
+import json
+
+def _normalize_ohlcv(payload: dict):
+    """Accept ohlcv as list OR as a JSON string, normalize to list."""
+    ohlcv = payload.get("ohlcv", [])
+    if isinstance(ohlcv, str):
+        try:
+            ohlcv = json.loads(ohlcv)
+        except Exception:
+            pass
+    payload["ohlcv"] = ohlcv
+    return payload
+
+def _maybe_parse_dict(value):
+    """If value is a JSON string, parse to dict; otherwise return as-is."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
 app = Flask(__name__)
 
 # -------- Safe config loads (works even if YAMLs are missing) --------
@@ -206,6 +228,7 @@ def features():
     }
     """
     data = request.get_json(force=True)
+  data = _normalize_ohlcv(data)
     df = to_df(data["ohlcv"])
     df["ema20"] = ema(df["close"], 20)
     df["ema50"] = ema(df["close"], 50)
@@ -239,6 +262,7 @@ def regime():
     }
     """
     data = request.get_json(force=True)
+    data = _normalize_ohlcv(data)
     df = to_df(data["ohlcv"])
     r = regime_tag(df)
     rq_map = {"Trend-Up":1.0, "Trend-Down":1.0, "Mean-Revert":0.6, "Chop":0.4}
@@ -265,6 +289,8 @@ def ensemble():
     }
     """
     j = request.get_json(force=True)
+    j["features"] = _maybe_parse_dict(j.get("features", {})) 
+    j["regime"]   = _maybe_parse_dict(j.get("regime", {}))
     feats = j.get("features", {})
     reg = j.get("regime", {})
 
