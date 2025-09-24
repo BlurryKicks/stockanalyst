@@ -3,10 +3,13 @@ import pandas as pd
 import numpy as np
 import yaml
 import os
-import json 
+import json
+import logging
+import traceback
 from datetime import datetime, timezone 
 
 app = Flask(__name__)
+app.logger.setLevel(logging.INFO)
 
 # ---------- helpers to accept stringified JSON from n8n ----------
 def _normalize_ohlcv(payload: dict):
@@ -276,27 +279,55 @@ def features():
 @app.route("/regime", methods=["POST"])
 def regime():
     """
-    Input JSON:
+    Expected JSON object (but we also accept a one-element array):
     {
-      "pair": "...",
-      "ohlcv": [...],  # may be stringified
+      "pair": "EURUSD",
+      "ohlcv": [ {ts, open, high, low, close, volume}, ... ],   # may be stringified
       "high_tf_bias": "up"|"down"|"neutral"
     }
     """
-    data = request.get_json(force=True)
-    data = _normalize_ohlcv(data)
+    try:
+        data = request.get_json(force=True)
+        app.logger.info("REGIME raw payload: %s", data)
 
-    df = to_df(data["ohlcv"])
-    r = regime_tag(df)
-    # ensure numeric fields are JSON-safe
-    r["ema50_slope"] = _jnum(r.get("ema50_slope"))
-    r["atrp"] = _jnum(r.get("atrp"))
+        # Tolerate [ { ... } ] if a batch slips through
+        if isinstance(data, list):
+            data = data[0] if data else {}
+            app.logger.info("REGIME normalized from list to object: %s", data)
 
-    rq_map = {"Trend-Up": 1.0, "Trend-Down": 1.0, "Mean-Revert": 0.6, "Chop": 0.4}
-    r["regime_quality"] = rq_map.get(r["regime"], 0.5)
-    r["pair"] = data.get("pair", "")
-    r["high_tf_bias"] = data.get("high_tf_bias", "neutral")
-    return jsonify(r)
+        # Validate base shape
+        if not isinstance(data, dict):
+            return jsonify({"error":"bad_request","message":"Body must be a JSON object"}), 400
+
+        # Normalize OHLCV even if stringified
+        data = _normalize_ohlcv(data)
+
+        # Validate required fields
+        pair = data.get("pair")
+        ohlcv = data.get("ohlcv")
+        if not pair or not isinstance(pair, str):
+            return jsonify({"error":"bad_request","message":"Field 'pair' is required as string"}), 400
+        if not isinstance(ohlcv, list) or len(ohlcv) == 0:
+            return jsonify({"error":"bad_request","message":"Field 'ohlcv' must be a non-empty array"}), 400
+
+        # Build dataframe
+        df = to_df(ohlcv)
+
+        # Compute regime + sanitize numbers
+        r = regime_tag(df)
+        r["ema50_slope"] = _jnum(r.get("ema50_slope"))
+        r["atrp"] = _jnum(r.get("atrp"))
+
+        rq_map = {"Trend-Up": 1.0, "Trend-Down": 1.0, "Mean-Revert": 0.6, "Chop": 0.4}
+        r["regime_quality"] = rq_map.get(r["regime"], 0.5)
+        r["pair"] = pair
+        r["high_tf_bias"] = data.get("high_tf_bias", "neutral")
+
+        return jsonify(r)
+
+    except Exception as e:
+        app.logger.exception("Regime error: %s", e)
+        return jsonify({"error":"server_error","message":str(e)}), 500
 
 @app.route("/ensemble", methods=["POST"])
 def ensemble():
